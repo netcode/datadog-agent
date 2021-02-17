@@ -8,14 +8,16 @@ package debug
 import (
 	"bufio"
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/DataDog/datadog-agent/pkg/dogstatsd/debug/pb"
+	"github.com/DataDog/datadog-agent/pkg/dogstatsd/packets"
 
 	"github.com/golang/protobuf/proto"
 )
@@ -24,69 +26,179 @@ const (
 	fileTemplate = "datadog-capture-%d"
 )
 
-type TrafficCaptureWriter struct {
-	captureFile *os.File
-	writer      *bufio.Writer
-	Traffic     <-chan *pb.UnixDogstatsdMsg
-	written     int
-	size        int
-	shutdown    <-chan struct{}
-	sync.Mutex
+type CaptureBuffer struct {
+	Pb   pb.UnixDogstatsdMsg
+	Oob  *[]byte
+	Buff *packets.Packet
 }
 
-func NewTrafficCaptureWriter(path string, size, depth int) (*TrafficCatpure, error) {
+var CapPool = sync.Pool{
+	New: func() interface{} {
+		return new(CaptureBuffer)
+	},
+}
 
-	fp, err := os.Create(path.Join(tc.path, fmt.Sprintf(fileTemplate, time.Now().Unix())))
+type TrafficCaptureWriter struct {
+	File     *os.File
+	writer   *bufio.Writer
+	Traffic  chan *CaptureBuffer
+	Duration time.Duration
+	written  int
+	shutdown chan struct{}
+	ongoing  bool
+
+	sharedPacketPoolManager *packets.PoolManager
+	oobPacketPoolManager    *packets.PoolManager
+
+	sync.RWMutex
+}
+
+func NewTrafficCaptureWriter(p string, dur time.Duration, depth int) (*TrafficCaptureWriter, error) {
+
+	fp, err := os.Create(path.Join(p, fmt.Sprintf(fileTemplate, time.Now().Unix())))
 	if err != nil {
 		return nil, err
 	}
 
-	return TrafficCaptureWriter{
-		captureFile: fp,
-		writer:      bufio.NewWriter(fp),
-		Traffic:     make(chan *pb.UnixDogstatsdMsg, depth),
-		size:        size,
+	return &TrafficCaptureWriter{
+		File:     fp,
+		writer:   bufio.NewWriter(fp),
+		Traffic:  make(chan *CaptureBuffer, depth),
+		Duration: dur,
+	}, nil
+}
+
+func (tc *TrafficCaptureWriter) Path() (string, error) {
+	tc.RLock()
+	defer tc.RUnlock()
+
+	if tc.File == nil {
+		return "", fmt.Errorf("No file set in writer")
 	}
+
+	return filepath.Abs(filepath.Dir(tc.File.Name()))
 }
 
 func (tc *TrafficCaptureWriter) Capture() {
+	tc.Lock()
 	tc.shutdown = make(chan struct{})
+	tc.ongoing = true
+	if tc.sharedPacketPoolManager != nil {
+		tc.sharedPacketPoolManager.SetPassthru(false)
+	}
+	if tc.oobPacketPoolManager != nil {
+		tc.oobPacketPoolManager.SetPassthru(false)
+	}
+	tc.Unlock()
+
+	go func() {
+		tc.RLock()
+		d := tc.Duration
+		tc.RUnlock()
+
+		<-time.After(d)
+		tc.StopCapture()
+	}()
+
 	for {
 		select {
-		case msg := <-tc.traffic:
+		case msg := <-tc.Traffic:
 			err := tc.WriteNext(msg)
 			if err != nil {
 				tc.StopCapture()
 			}
-		case <-shutdown:
+
+			if tc.sharedPacketPoolManager != nil {
+				tc.sharedPacketPoolManager.Put(msg.Buff)
+			}
+
+			if tc.oobPacketPoolManager != nil {
+				tc.oobPacketPoolManager.Put(msg.Oob)
+			}
+		case <-tc.shutdown:
 			return
+		}
+	}
+
+	// discard packets in queue, empty the channel when depth > 1
+cleanup:
+	for {
+		select {
+		case msg := <-tc.Traffic:
+			if tc.sharedPacketPoolManager != nil {
+				tc.sharedPacketPoolManager.Put(msg.Buff)
+			}
+
+			if tc.oobPacketPoolManager != nil {
+				tc.oobPacketPoolManager.Put(msg.Oob)
+			}
+		default:
+			break cleanup
 		}
 	}
 }
 
-func (tc *TrafficCaptureWriter) StopCapture() err {
-	tc.writer.Flush()
-	close(tc.shutdown)
+func (tc *TrafficCaptureWriter) StopCapture() error {
+	tc.Lock()
+	defer tc.Unlock()
 
-	return tc.captureFile.Close()
+	tc.writer.Flush()
+
+	if tc.sharedPacketPoolManager != nil {
+		tc.sharedPacketPoolManager.SetPassthru(false)
+	}
+	if tc.oobPacketPoolManager != nil {
+		tc.oobPacketPoolManager.SetPassthru(false)
+	}
+
+	close(tc.shutdown)
+	tc.ongoing = false
+
+	return tc.File.Close()
 }
 
-func (tc *TrafficCaptureWriter) WriteNext(msg *pb.UnixDogstatsdMsg) error {
-	buff, err := proto.Marshal(*msg)
+func (tc *TrafficCaptureWriter) Enqueue(msg *CaptureBuffer) {
+	tc.RLock()
+	if tc.ongoing {
+		tc.Traffic <- msg
+	}
+	tc.Unlock()
+}
+
+func (tc *TrafficCaptureWriter) RegisterSharedPoolManager(p *packets.PoolManager) error {
+	if tc.sharedPacketPoolManager != nil {
+		return fmt.Errorf("OOB Pool Manager already registered with the writer")
+	}
+
+	tc.sharedPacketPoolManager = p
+
+	return nil
+}
+
+func (tc *TrafficCaptureWriter) RegisterOOBPoolManager(p *packets.PoolManager) error {
+	if tc.oobPacketPoolManager != nil {
+		return fmt.Errorf("OOB Pool Manager already registered with the writer")
+	}
+
+	tc.oobPacketPoolManager = p
+
+	return nil
+}
+
+func (tc *TrafficCaptureWriter) IsOngoing() bool {
+	tc.RLock()
+	defer tc.RUnlock()
+
+	return tc.ongoing
+}
+
+func (tc *TrafficCaptureWriter) WriteNext(msg *CaptureBuffer) error {
+	buff, err := proto.Marshal(&msg.Pb)
 	if err != nil {
 		return err
 	}
 
-	tc.Lock()
-	if tc.written+len(buff)+4 > tc.size {
-		err = errors.New("writing record would exceed maximum size")
-		tc.Unlock()
-
-		return err
-	}
-	tc.Unlock()
-
-	n, err = Write(tc.activeFp, buff)
+	n, err := tc.Write(buff)
 	if err != nil {
 		// continuing writes after this would result in a corrupted file
 		return err
@@ -97,26 +209,12 @@ func (tc *TrafficCaptureWriter) WriteNext(msg *pb.UnixDogstatsdMsg) error {
 
 	tc.written += n + 4 // buffer + record length
 
+	return nil
 }
 
-func (tc *TrafficCapture) ReadNext() (*pb.UnixDogstatsdMsg, error) {
-	buff, err := Read(tc.fp)
-	if err != nil {
-		return nil, err
-	}
-
-	msg := pb.UnixDogstatsdMsg{}
-	err = proto.Unmarshal(buff, msg)
-	if err != nil {
-		return nil, err
-	}
-
-	return &msg, nil
-}
-
-func (tc *TrafficCapture) Write(p []byte) (int, error) {
+func (tc *TrafficCaptureWriter) Write(p []byte) (int, error) {
 	buf := make([]byte, 4)
-	binary.LittleEndian.PutInt32(buf, Uint32(len(p)))
+	binary.LittleEndian.PutUint32(buf, uint32(len(p)))
 
 	// Record size
 	if n, err := tc.writer.Write(buf); err != nil {
@@ -124,9 +222,9 @@ func (tc *TrafficCapture) Write(p []byte) (int, error) {
 	}
 
 	// Record
-	n, err = tc.writer.Write(p)
+	n, err := tc.writer.Write(p)
 
-	return n + 4, nil
+	return n + 4, err
 }
 
 func Read(r io.Reader) ([]byte, error) {
@@ -138,7 +236,9 @@ func Read(r io.Reader) ([]byte, error) {
 	size := binary.LittleEndian.Uint32(buf)
 
 	msg := make([]byte, size)
-	if _, err := io.ReadFull(r, msg); err != nil {
+
+	_, err := io.ReadFull(r, msg)
+	if err != nil {
 		return nil, err
 	}
 
