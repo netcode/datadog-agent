@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2016-present Datadog, Inc.
+// Copyright 2016-2020 Datadog, Inc.
 
 package dogstatsd
 
@@ -154,7 +154,10 @@ func NewServer(aggregator *aggregator.BufferedAggregator, extraTags []string) (*
 
 	packetsChannel := make(chan packets.Packets, config.Datadog.GetInt("dogstatsd_queue_size"))
 	tmpListeners := make([]listeners.StatsdListener, 0, 2)
-	capture := debug.NewTrafficCapture()
+	capture, err := debug.NewTrafficCapture()
+	if err != nil {
+		return nil, err
+	}
 
 	// sharedPacketPool is used by the packet assembler to retrieve already allocated
 	// buffer in order to avoid allocation. The packets are pushed back by the server.
@@ -540,6 +543,9 @@ func (s *Server) Stop() {
 	}
 	if s.Statistics != nil {
 		s.Statistics.Stop()
+	}
+	if s.TCapture != nil {
+		s.TCapture.Stop()
 	}
 	s.health.Deregister() //nolint:errcheck
 	s.Started = false

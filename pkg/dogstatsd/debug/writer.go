@@ -18,6 +18,7 @@ import (
 
 	"github.com/DataDog/datadog-agent/pkg/dogstatsd/debug/pb"
 	"github.com/DataDog/datadog-agent/pkg/dogstatsd/packets"
+	"github.com/DataDog/datadog-agent/pkg/util/log"
 
 	"github.com/golang/protobuf/proto"
 )
@@ -42,8 +43,7 @@ type TrafficCaptureWriter struct {
 	File     *os.File
 	writer   *bufio.Writer
 	Traffic  chan *CaptureBuffer
-	Duration time.Duration
-	written  int
+	Location string
 	shutdown chan struct{}
 	ongoing  bool
 
@@ -53,18 +53,11 @@ type TrafficCaptureWriter struct {
 	sync.RWMutex
 }
 
-func NewTrafficCaptureWriter(p string, dur time.Duration, depth int) (*TrafficCaptureWriter, error) {
-
-	fp, err := os.Create(path.Join(p, fmt.Sprintf(fileTemplate, time.Now().Unix())))
-	if err != nil {
-		return nil, err
-	}
+func NewTrafficCaptureWriter(l string, depth int) (*TrafficCaptureWriter, error) {
 
 	return &TrafficCaptureWriter{
-		File:     fp,
-		writer:   bufio.NewWriter(fp),
+		Location: l,
 		Traffic:  make(chan *CaptureBuffer, depth),
-		Duration: dur,
 	}, nil
 }
 
@@ -76,13 +69,27 @@ func (tc *TrafficCaptureWriter) Path() (string, error) {
 		return "", fmt.Errorf("No file set in writer")
 	}
 
-	return filepath.Abs(filepath.Dir(tc.File.Name()))
+	return filepath.Abs(tc.File.Name())
 }
 
-func (tc *TrafficCaptureWriter) Capture() {
+func (tc *TrafficCaptureWriter) Capture(d time.Duration) {
+
+	log.Debugf("Starting capture...")
+
 	tc.Lock()
+
+	fp, err := os.Create(path.Join(tc.Location, fmt.Sprintf(fileTemplate, time.Now().Unix())))
+	if err != nil {
+		fmt.Errorf("There was an issue starting the capture: %v ", err)
+
+		tc.Unlock()
+		return
+	}
+	tc.File = fp
+	tc.writer = bufio.NewWriter(fp)
 	tc.shutdown = make(chan struct{})
 	tc.ongoing = true
+
 	if tc.sharedPacketPoolManager != nil {
 		tc.sharedPacketPoolManager.SetPassthru(false)
 	}
@@ -92,9 +99,7 @@ func (tc *TrafficCaptureWriter) Capture() {
 	tc.Unlock()
 
 	go func() {
-		tc.RLock()
-		d := tc.Duration
-		tc.RUnlock()
+		log.Debugf("Capture will be stopped after %v", d)
 
 		<-time.After(d)
 		tc.StopCapture()
@@ -116,6 +121,7 @@ func (tc *TrafficCaptureWriter) Capture() {
 				tc.oobPacketPoolManager.Put(msg.Oob)
 			}
 		case <-tc.shutdown:
+			log.Debugf("Capture shutting down")
 			return
 		}
 	}
@@ -142,6 +148,10 @@ func (tc *TrafficCaptureWriter) StopCapture() error {
 	tc.Lock()
 	defer tc.Unlock()
 
+	if !tc.ongoing {
+		return nil
+	}
+
 	tc.writer.Flush()
 
 	if tc.sharedPacketPoolManager != nil {
@@ -154,6 +164,7 @@ func (tc *TrafficCaptureWriter) StopCapture() error {
 	close(tc.shutdown)
 	tc.ongoing = false
 
+	log.Debugf("Capture was stopped")
 	return tc.File.Close()
 }
 
@@ -198,16 +209,11 @@ func (tc *TrafficCaptureWriter) WriteNext(msg *CaptureBuffer) error {
 		return err
 	}
 
-	n, err := tc.Write(buff)
+	_, err = tc.Write(buff)
 	if err != nil {
 		// continuing writes after this would result in a corrupted file
 		return err
 	}
-
-	tc.Lock()
-	defer tc.Unlock()
-
-	tc.written += n + 4 // buffer + record length
 
 	return nil
 }

@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2016-present Datadog, Inc.
+// Copyright 2016-2020 Datadog, Inc.
 
 /*
 Package api implements the agent IPC api. Using HTTP
@@ -68,6 +68,11 @@ func (s *serverSecure) DogstatsdCaptureTrigger(ctx context.Context, req *pb.Capt
 	err = common.DSD.Capture(d)
 	if err != nil {
 		return &pb.CaptureTriggerResponse{}, err
+	}
+
+	// wait for the capture to start
+	for !common.DSD.TCapture.IsOngoing() {
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	p, err := common.DSD.TCapture.Path()

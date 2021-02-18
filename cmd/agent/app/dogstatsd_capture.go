@@ -9,6 +9,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"time"
 
 	"github.com/DataDog/datadog-agent/cmd/agent/api/pb"
@@ -21,6 +23,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -35,6 +38,9 @@ const (
 func init() {
 	AgentCmd.AddCommand(dogstatsdCaptureCmd)
 	dogstatsdCaptureCmd.Flags().DurationVarP(&dsdCaptureDuration, "duration", "d", defaultCaptureDuration, "Duration traffic capture should span.")
+
+	// shut up grpc client!
+	grpclog.SetLogger(log.New(ioutil.Discard, "", 0))
 }
 
 var dogstatsdCaptureCmd = &cobra.Command{
