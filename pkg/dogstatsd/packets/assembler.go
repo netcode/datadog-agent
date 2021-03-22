@@ -12,21 +12,21 @@ import (
 
 const messageSeparator = byte('\n')
 
-// PacketAssembler merges multiple incoming datagrams into one "Packet" object to
+// Assembler merges multiple incoming datagrams into one "Packet" object to
 // save space and make number of message in a single "Packet" more predictable
-type PacketAssembler struct {
+type Assembler struct {
 	packet       *Packet
 	packetLength int
 	// assembled packets are pushed into this buffer
-	packetsBuffer           *PacketsBuffer
+	packetsBuffer           *Buffer
 	sharedPacketPoolManager *PoolManager
 	flushTimer              *time.Ticker
 	closeChannel            chan struct{}
 	sync.Mutex
 }
 
-func NewPacketAssembler(flushTimer time.Duration, packetsBuffer *PacketsBuffer, sharedPacketPoolManager *PoolManager) *PacketAssembler {
-	packetAssembler := &PacketAssembler{
+func NewAssembler(flushTimer time.Duration, packetsBuffer *Buffer, sharedPacketPoolManager *PoolManager) *Assembler {
+	packetAssembler := &Assembler{
 		// retrieve an available packet from the packet pool,
 		// which will be pushed back by the server when processed.
 		packet:                  sharedPacketPoolManager.Get().(*Packet),
@@ -39,7 +39,7 @@ func NewPacketAssembler(flushTimer time.Duration, packetsBuffer *PacketsBuffer, 
 	return packetAssembler
 }
 
-func (p *PacketAssembler) flushLoop() {
+func (p *Assembler) flushLoop() {
 	for {
 		select {
 		case <-p.flushTimer.C:
@@ -52,7 +52,7 @@ func (p *PacketAssembler) flushLoop() {
 	}
 }
 
-func (p *PacketAssembler) AddMessage(message []byte) {
+func (p *Assembler) AddMessage(message []byte) {
 	p.Lock()
 	if p.packetLength == 0 {
 		p.packetLength = copy(p.packet.Buffer, message)
@@ -67,7 +67,7 @@ func (p *PacketAssembler) AddMessage(message []byte) {
 	p.Unlock()
 }
 
-func (p *PacketAssembler) flush() {
+func (p *Assembler) flush() {
 	if p.packetLength == 0 {
 		return
 	}
@@ -79,7 +79,7 @@ func (p *PacketAssembler) flush() {
 	p.packetLength = 0
 }
 
-func (p *PacketAssembler) Close() {
+func (p *Assembler) Close() {
 	p.Lock()
 	close(p.closeChannel)
 	p.Unlock()
