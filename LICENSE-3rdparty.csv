@@ -393,8 +393,6 @@ core,"github.com/ianlancetaylor/cgosymbolizer",NewBSD
 core,"github.com/ianlancetaylor/demangle",NewBSD
 core,"github.com/imdario/mergo",NewBSD
 core,"github.com/inconshreveable/mousetrap",Apache-2.0
-core,"github.com/iovisor/gobpf/bcc",Apache-2.0
-core,"github.com/iovisor/gobpf/pkg/cpuonline",Apache-2.0
 core,"github.com/iovisor/gobpf/pkg/cpupossible",Apache-2.0
 core,"github.com/iovisor/gobpf/pkg/cpurange",Apache-2.0
 core,"github.com/itchyny/astgen-go",MIT
