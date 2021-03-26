@@ -91,12 +91,28 @@ int kprobe__security_inode_rmdir(struct pt_regs *ctx) {
     }
 
     if (dentry != NULL) {
-        int ret = resolve_dentry(dentry, key, syscall->policy.mode != NO_FILTER ? event_type : 0);
-        if (ret == DENTRY_DISCARDED) {
-            return mark_as_discarded(syscall);
-        }
+        syscall->resolver.key = key;
+        syscall->resolver.dentry = dentry;
+        syscall->resolver.discarder_type = syscall->policy.mode != NO_FILTER ? event_type : 0;
+        syscall->resolver.callback = DR_SECURITY_INODE_RMDIR_CALLBACK_KEY;
+        syscall->resolver.iteration = 0;
+        syscall->resolver.ret = 0;
+
+        resolve_dentry(ctx);
     }
 
+    return 0;
+}
+
+SEC("kprobe/dr_security_inode_rmdir_callback")
+int __attribute__((always_inline)) dr_security_inode_rmdir_callback(struct pt_regs *ctx) {
+    struct syscall_cache_t *syscall = peek_syscall(SYSCALL_RMDIR | SYSCALL_UNLINK);
+    if (!syscall)
+        return 0;
+
+    if (syscall->resolver.ret == DENTRY_DISCARDED) {
+        return mark_as_discarded(syscall);
+    }
     return 0;
 }
 

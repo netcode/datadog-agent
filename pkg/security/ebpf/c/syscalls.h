@@ -11,10 +11,21 @@ struct str_array_ref_t {
     u8 truncated;
 };
 
+struct dentry_resolver_input_t {
+    struct path_key_t key;
+    struct dentry *dentry;
+    u64 discarder_type;
+    int callback;
+    int ret;
+    int iteration;
+};
+
 struct syscall_cache_t {
     struct policy_t policy;
     u64 type;
     u32 discarded;
+
+    struct dentry_resolver_input_t resolver;
 
     union {
         struct {
@@ -72,6 +83,7 @@ struct syscall_cache_t {
             struct mount *dest_mnt;
             struct mountpoint *dest_mountpoint;
             struct path_key_t root_key;
+            struct path_key_t path_key;
             const char *fstype;
         } mount;
 

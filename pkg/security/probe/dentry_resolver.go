@@ -10,6 +10,9 @@ package probe
 import (
 	"C"
 	"fmt"
+	"github.com/DataDog/datadog-agent/pkg/util/log"
+	"golang.org/x/sys/unix"
+	"os"
 	"unsafe"
 
 	lib "github.com/DataDog/ebpf"
@@ -25,9 +28,13 @@ const (
 
 // DentryResolver resolves inode/mountID to full paths
 type DentryResolver struct {
-	probe     *Probe
-	pathnames *lib.Map
-	cache     map[uint32]*lru.Cache
+	probe       *Probe
+	pathnames   *lib.Map
+	cache       map[uint32]*lru.Cache
+	erpc        *ERPC
+	erpcSegment []byte
+	erpcSegmentSize int
+	erpcRequest ERPCRequest
 }
 
 // ErrInvalidKeyPath is returned when inode or mountid are not valid
@@ -268,6 +275,37 @@ func (dr *DentryResolver) ResolveFromMap(mountID uint32, inode uint64, pathID ui
 	return filename, err
 }
 
+// ResolveFromERPC resolves using eRPC
+func (dr *DentryResolver) ResolveFromERPC(mountID uint32, inode uint64, pathID uint32) (string, error) {
+	var filename, segment string
+	var err, resolutionErr error
+	var truncatedSegmentErr ErrTruncatedSegment
+
+	// create eRPC request
+	model.ByteOrder.PutUint64(dr.erpcRequest.Data[0:8], inode)
+	model.ByteOrder.PutUint32(dr.erpcRequest.Data[8:12], mountID)
+	model.ByteOrder.PutUint32(dr.erpcRequest.Data[12:16], pathID)
+	if err = dr.erpc.Request(&dr.erpcRequest); err != nil {
+		return "", err
+	}
+
+	for i := 0; i < dr.erpcSegmentSize; i += model.MaxSegmentLength {
+		if dr.erpcSegment[i] == 0 || dr.erpcSegment[i] == '/' {
+			break
+		}
+		segment = C.GoString((*C.char)(unsafe.Pointer(&dr.erpcSegment[i])))
+		if len(segment) >= (model.MaxSegmentLength) {
+			resolutionErr = truncatedSegmentErr
+		}
+		filename = "/" + segment + filename
+	}
+
+	if inode>>32 != fakeInodeMSW {
+		_ = dr.cacheInode(mountID, inode, PathValue{})
+	}
+	return filename, resolutionErr
+}
+
 // Resolve the pathname of a dentry, starting at the pathnameKey in the pathnames table
 func (dr *DentryResolver) Resolve(mountID uint32, inode uint64, pathID uint32) (string, error) {
 	path, err := dr.ResolveFromCache(mountID, inode)
@@ -340,8 +378,29 @@ var errTruncatedParents ErrTruncatedParents
 
 // NewDentryResolver returns a new dentry resolver
 func NewDentryResolver(probe *Probe) (*DentryResolver, error) {
+	erpcClient, err := NewERPC()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to initialize eRPC client")
+	}
+
+	segment, err := unix.Mmap(0, 0, 2*os.Getpagesize(), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_ANON)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to mmap memory segment")
+	}
+	segmentAddr := uint64(uintptr(unsafe.Pointer(&segment[0])))
+	log.Debugf("DentryResolver memory segment: %d", segment[0])
+
+	req := ERPCRequest{
+		OP: ResolvePathOp,
+	}
+	model.ByteOrder.PutUint64(req.Data[16:24], segmentAddr)
+
 	return &DentryResolver{
-		probe: probe,
-		cache: make(map[uint32]*lru.Cache),
+		probe:       probe,
+		cache:       make(map[uint32]*lru.Cache),
+		erpc:        erpcClient,
+		erpcSegment: segment,
+		erpcSegmentSize: len(segment),
+		erpcRequest: req,
 	}, nil
 }

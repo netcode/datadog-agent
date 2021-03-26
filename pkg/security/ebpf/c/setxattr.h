@@ -89,9 +89,25 @@ int __attribute__((always_inline)) trace__vfs_setxattr(struct pt_regs *ctx, u64 
     set_file_inode(syscall->xattr.dentry, &syscall->xattr.file, 0);
 
     // the mount id of path_key is resolved by kprobe/mnt_want_write. It is already set by the time we reach this probe.
-    int ret = resolve_dentry(syscall->xattr.dentry, syscall->xattr.file.path_key, syscall->policy.mode != NO_FILTER ? event_type : 0);
-    if (ret == DENTRY_DISCARDED) {
+    syscall->resolver.dentry = syscall->xattr.dentry;
+    syscall->resolver.key = syscall->xattr.file.path_key;
+    syscall->resolver.discarder_type = syscall->policy.mode != NO_FILTER ? event_type : 0;
+    syscall->resolver.callback = DR_SETXATTR_CALLBACK_KEY;
+    syscall->resolver.iteration = 0;
+    syscall->resolver.ret = 0;
+
+    resolve_dentry(ctx);
+    return 0;
+}
+
+SEC("kprobe/dr_setxattr_callback")
+int __attribute__((always_inline)) dr_setxattr_callback(struct pt_regs *ctx) {
+    struct syscall_cache_t *syscall = peek_syscall(EVENT_SETXATTR | EVENT_REMOVEXATTR);
+    if (!syscall)
         return 0;
+
+    if (syscall->resolver.ret == DENTRY_DISCARDED) {
+        return discard_syscall(syscall);
     }
 
     return 0;

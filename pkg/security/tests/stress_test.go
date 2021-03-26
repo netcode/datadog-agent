@@ -10,11 +10,17 @@ package tests
 import (
 	"flag"
 	"fmt"
+	"github.com/DataDog/datadog-agent/pkg/security/model"
+	"github.com/DataDog/datadog-agent/pkg/security/probe"
+	"github.com/pkg/errors"
+	"golang.org/x/sys/unix"
 	"os"
 	"os/exec"
 	"path"
+	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/cihub/seelog"
 
@@ -309,6 +315,245 @@ func TestStress_E2EExecEvent(t *testing.T) {
 	}
 
 	stressExec(t, rule, "folder1/folder2/test-ancestors", executable)
+}
+
+func BenchmarkERPCDentryResolutionSegment(b *testing.B) {
+	rule := &rules.RuleDefinition{
+		ID:         "test_rule",
+		Expression: `open.file.path == "{{.Root}}/aa/bb/cc/dd/ee" && open.flags & O_CREAT != 0`,
+	}
+
+	test, err := newTestModule(nil, []*rules.RuleDefinition{rule}, testOpts{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer test.Close()
+
+	testFile, testFilePtr, err := test.Path("aa/bb/cc/dd/ee")
+	if err != nil {
+		b.Fatal(err)
+	}
+	_ = os.MkdirAll(path.Dir(testFile), 0755)
+
+	segment, err := unix.Mmap(0, 0, 2 * os.Getpagesize(), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_ANON)
+	if err != nil {
+		b.Fatal(errors.Wrap(err, "failed to mmap memory segment"))
+	}
+
+	erpcClient, err := probe.NewERPC()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	fd, _, errno := syscall.Syscall(syscall.SYS_OPEN, uintptr(testFilePtr), syscall.O_CREAT, 0755)
+	if errno != 0 {
+		b.Fatal(error(errno))
+	}
+	defer os.Remove(testFile)
+	defer syscall.Close(int(fd))
+
+	event, _, err := test.GetEvent()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	req := probe.ERPCRequest{
+		OP: probe.ResolveSegmentOp,
+	}
+	model.ByteOrder.PutUint64(req.Data[0:8], event.Open.File.Inode)
+	model.ByteOrder.PutUint32(req.Data[8:12], event.Open.File.MountID)
+	model.ByteOrder.PutUint32(req.Data[12:16], event.Open.File.PathID)
+	model.ByteOrder.PutUint64(req.Data[16:24], uint64(uintptr(unsafe.Pointer(&segment[0]))))
+
+	// for some reason if we don't try to access the segment, the eBPF program can't write to it ... does it have something to do with unsafe.Pointer ?
+	b.Log(segment[0])
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		if err := erpcClient.Request(&req); err != nil {
+			b.Fatal(err)
+		}
+
+		if segment[0] == 0 {
+			b.Fatal("couldn't retrieve segment")
+		}
+	}
+
+	test.Close()
+}
+
+func BenchmarkERPCDentryResolutionPath(b *testing.B) {
+	rule := &rules.RuleDefinition{
+		ID:         "test_rule",
+		Expression: `open.file.path == "{{.Root}}/aa/bb/cc/dd/ee" && open.flags & O_CREAT != 0`,
+	}
+
+	test, err := newTestModule(nil, []*rules.RuleDefinition{rule}, testOpts{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer test.Close()
+
+	testFile, testFilePtr, err := test.Path("aa/bb/cc/dd/ee")
+	if err != nil {
+		b.Fatal(err)
+	}
+	_ = os.MkdirAll(path.Dir(testFile), 0755)
+
+	fd, _, errno := syscall.Syscall(syscall.SYS_OPEN, uintptr(testFilePtr), syscall.O_CREAT, 0755)
+	if errno != 0 {
+		b.Fatal(error(errno))
+	}
+	defer os.Remove(testFile)
+	defer syscall.Close(int(fd))
+
+	event, _, err := test.GetEvent()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// create a new dentry resolver to avoid concurrent map access errors
+	resolver, err := probe.NewDentryResolver(test.probe)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	if err := resolver.Start(); err != nil {
+		b.Fatal(err)
+	}
+	f, err := resolver.ResolveFromERPC(event.Open.File.MountID, event.Open.File.Inode, event.Open.File.PathID)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Log(f)
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		f, err := resolver.ResolveFromERPC(event.Open.File.MountID, event.Open.File.Inode, event.Open.File.PathID)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if f[0] == 0 {
+			b.Fatal("couldn't resolve file")
+		}
+	}
+
+	test.Close()
+}
+
+func BenchmarkMapDentryResolutionSegment(b *testing.B) {
+	rule := &rules.RuleDefinition{
+		ID:         "test_rule",
+		Expression: `open.file.path == "{{.Root}}/aa/bb/cc/dd/ee" && open.flags & O_CREAT != 0`,
+	}
+
+	test, err := newTestModule(nil, []*rules.RuleDefinition{rule}, testOpts{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer test.Close()
+
+	testFile, testFilePtr, err := test.Path("aa/bb/cc/dd/ee")
+	if err != nil {
+		b.Fatal(err)
+	}
+	_ = os.MkdirAll(path.Dir(testFile), 0755)
+
+	fd, _, errno := syscall.Syscall(syscall.SYS_OPEN, uintptr(testFilePtr), syscall.O_CREAT, 0755)
+	if errno != 0 {
+		b.Fatal(error(errno))
+	}
+	defer os.Remove(testFile)
+	defer syscall.Close(int(fd))
+
+	event, _, err := test.GetEvent()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var path probe.PathValue
+	key := probe.PathKey{
+		Inode:   event.Open.File.Inode,
+		MountID: event.Open.File.MountID,
+		PathID:  event.Open.File.PathID,
+	}
+
+	keyBuffer, err := key.MarshalBinary()
+	if err != nil {
+		b.Fatal(err)
+	}
+	key.Write(keyBuffer)
+
+	eMap, err := test.probe.Map("pathnames")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		if err = eMap.Lookup(keyBuffer, &path); err != nil {
+			b.Fatal(err)
+		}
+		if path.Name[0] == 0 {
+			b.Fatal("couldn't retrieve segment")
+		}
+	}
+
+	test.Close()
+}
+
+func BenchmarkMapDentryResolutionPath(b *testing.B) {
+	rule := &rules.RuleDefinition{
+		ID:         "test_rule",
+		Expression: `open.file.path == "{{.Root}}/aa/bb/cc/dd/ee" && open.flags & O_CREAT != 0`,
+	}
+
+	test, err := newTestModule(nil, []*rules.RuleDefinition{rule}, testOpts{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer test.Close()
+
+	testFile, testFilePtr, err := test.Path("aa/bb/cc/dd/ee")
+	if err != nil {
+		b.Fatal(err)
+	}
+	_ = os.MkdirAll(path.Dir(testFile), 0755)
+
+	fd, _, errno := syscall.Syscall(syscall.SYS_OPEN, uintptr(testFilePtr), syscall.O_CREAT, 0755)
+	if errno != 0 {
+		b.Fatal(error(errno))
+	}
+	defer os.Remove(testFile)
+	defer syscall.Close(int(fd))
+
+	event, _, err := test.GetEvent()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// create a new dentry resolver to avoid concurrent map access errors
+	resolver, err := probe.NewDentryResolver(test.probe)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	if err := resolver.Start(); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		f, err := resolver.ResolveFromMap(event.Open.File.MountID, event.Open.File.Inode, event.Open.File.PathID)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if f[0] == 0 {
+			b.Fatal("couldn't resolve file")
+		}
+	}
+
+	test.Close()
 }
 
 func init() {

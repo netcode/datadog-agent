@@ -65,8 +65,24 @@ int kprobe__vfs_unlink(struct pt_regs *ctx) {
     }
 
     // the mount id of path_key is resolved by kprobe/mnt_want_write. It is already set by the time we reach this probe.
-    int ret = resolve_dentry(dentry, syscall->unlink.file.path_key, syscall->policy.mode != NO_FILTER ? EVENT_UNLINK : 0);
-    if (ret < 0) {
+    syscall->resolver.dentry = dentry;
+    syscall->resolver.key = syscall->unlink.file.path_key;
+    syscall->resolver.discarder_type = syscall->policy.mode != NO_FILTER ? EVENT_UNLINK : 0;
+    syscall->resolver.callback = DR_UNLINK_CALLBACK_KEY;
+    syscall->resolver.iteration = 0;
+    syscall->resolver.ret = 0;
+
+    resolve_dentry(ctx);
+    return 0;
+}
+
+SEC("kprobe/dr_unlink_callback")
+int __attribute__((always_inline)) dr_unlink_callback(struct pt_regs *ctx) {
+    struct syscall_cache_t *syscall = peek_syscall(SYSCALL_UNLINK);
+    if (!syscall)
+        return 0;
+
+    if (syscall->resolver.ret < 0) {
         return mark_as_discarded(syscall);
     }
 

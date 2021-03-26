@@ -67,7 +67,7 @@ int kprobe__vfs_mkdir(struct pt_regs *ctx) {
 }
 
 int __attribute__((always_inline)) trace__sys_mkdir_ret(struct pt_regs *ctx) {
-    struct syscall_cache_t *syscall = pop_syscall(SYSCALL_MKDIR);
+    struct syscall_cache_t *syscall = peek_syscall(SYSCALL_MKDIR);
     if (!syscall)
         return 0;
 
@@ -78,9 +78,32 @@ int __attribute__((always_inline)) trace__sys_mkdir_ret(struct pt_regs *ctx) {
     // the inode of the dentry was not properly set when kprobe/security_path_mkdir was called, make sure we grab it now
     set_file_inode(syscall->mkdir.dentry, &syscall->mkdir.file, 0);
 
-    int ret = resolve_dentry(syscall->mkdir.dentry, syscall->mkdir.file.path_key, syscall->policy.mode != NO_FILTER ? EVENT_MKDIR : 0);
-    if (ret == DENTRY_DISCARDED) {
+    syscall->resolver.key = syscall->mkdir.file.path_key;
+    syscall->resolver.dentry = syscall->mkdir.dentry;
+    syscall->resolver.discarder_type = syscall->policy.mode != NO_FILTER ? EVENT_MKDIR : 0;
+    syscall->resolver.callback = DR_MKDIR_CALLBACK_KEY;
+    syscall->resolver.iteration = 0;
+    syscall->resolver.ret = 0;
+
+    resolve_dentry(ctx);
+
+    // if the tail call fails, we need to pop the syscall cache entry
+    pop_syscall(SYSCALL_MKDIR);
+    return 0;
+}
+
+SEC("kprobe/dr_mkdir_callback")
+int __attribute__((always_inline)) dr_mkdir_callback(struct pt_regs *ctx) {
+    int retval = PT_REGS_RC(ctx);
+    if (IS_UNHANDLED_ERROR(retval))
         return 0;
+
+    struct syscall_cache_t *syscall = pop_syscall(SYSCALL_MKDIR);
+    if (!syscall)
+        return 0;
+
+    if (syscall->resolver.ret == DENTRY_DISCARDED) {
+       return 0;
     }
 
     struct mkdir_event_t event = {

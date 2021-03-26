@@ -233,6 +233,10 @@ enum syscall_type
     SYSCALL_CAPSET      = 1 << EVENT_CAPSET,
 };
 
+// ALL_SYSCALLS is used to select the syscall cache entry of any syscall.
+// Update 32 to the closed power of 2, higher than the max syscall.
+#define ALL_SYSCALLS 0xffffffff
+
 struct kevent_t {
     u64 cpu;
     u64 timestamp;

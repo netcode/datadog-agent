@@ -73,8 +73,24 @@ int kprobe__vfs_link(struct pt_regs *ctx) {
     if (is_overlayfs(src_dentry))
         syscall->link.target_file.flags |= UPPER_LAYER;
 
-    int ret = resolve_dentry(src_dentry, syscall->link.src_file.path_key, syscall->policy.mode != NO_FILTER ? EVENT_LINK : 0);
-    if (ret == DENTRY_DISCARDED) {
+    syscall->resolver.dentry = src_dentry;
+    syscall->resolver.key = syscall->link.src_file.path_key;
+    syscall->resolver.discarder_type = syscall->policy.mode != NO_FILTER ? EVENT_LINK : 0;
+    syscall->resolver.callback = DR_LINK_SRC_CALLBACK_KEY;
+    syscall->resolver.iteration = 0;
+    syscall->resolver.ret = 0;
+
+    resolve_dentry(ctx);
+    return 0;
+}
+
+SEC("kprobe/dr_link_src_callback")
+int __attribute__((always_inline)) dr_link_src_callback(struct pt_regs *ctx) {
+    struct syscall_cache_t *syscall = peek_syscall(SYSCALL_LINK);
+    if (!syscall)
+        return 0;
+
+    if (syscall->resolver.ret == DENTRY_DISCARDED) {
         return discard_syscall(syscall);
     }
 
@@ -82,6 +98,30 @@ int kprobe__vfs_link(struct pt_regs *ctx) {
 }
 
 int __attribute__((always_inline)) trace__sys_link_ret(struct pt_regs *ctx) {
+    struct syscall_cache_t *syscall = pop_syscall(SYSCALL_LINK);
+    if (!syscall)
+        return 0;
+
+    int retval = PT_REGS_RC(ctx);
+    if (IS_UNHANDLED_ERROR(retval))
+        return 0;
+
+    syscall->resolver.dentry = syscall->link.target_dentry;
+    syscall->resolver.key = syscall->link.target_file.path_key;
+    syscall->resolver.discarder_type = 0;
+    syscall->resolver.callback = DR_LINK_DST_CALLBACK_KEY;
+    syscall->resolver.iteration = 0;
+    syscall->resolver.ret = 0;
+
+    resolve_dentry(ctx);
+
+    // if the tail call fails, we need to pop the syscall cache entry
+    pop_syscall(SYSCALL_LINK);
+    return 0;
+}
+
+SEC("kprobe/dr_link_dst_callback")
+int __attribute__((always_inline)) dr_link_dst_callback(struct pt_regs *ctx) {
     struct syscall_cache_t *syscall = pop_syscall(SYSCALL_LINK);
     if (!syscall)
         return 0;
@@ -100,8 +140,6 @@ int __attribute__((always_inline)) trace__sys_link_ret(struct pt_regs *ctx) {
 
     struct proc_cache_t *entry = fill_process_context(&event.process);
     fill_container_context(entry, &event.container);
-
-    resolve_dentry(syscall->link.target_dentry, syscall->link.target_file.path_key, 0);
 
     send_event(ctx, EVENT_LINK, event);
 

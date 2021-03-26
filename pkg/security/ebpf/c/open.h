@@ -174,7 +174,7 @@ int kprobe__do_dentry_open(struct pt_regs *ctx) {
     struct file *file = (struct file *)PT_REGS_PARM1(ctx);
     struct inode *inode = (struct inode *)PT_REGS_PARM2(ctx);
 
-    return handle_exec_event(syscall, file, &file->f_path, inode);
+    return handle_exec_event(ctx, syscall, file, &file->f_path, inode);
 }
 
 int __attribute__((always_inline)) trace__sys_open_ret(struct pt_regs *ctx) {
@@ -182,9 +182,37 @@ int __attribute__((always_inline)) trace__sys_open_ret(struct pt_regs *ctx) {
     if (IS_UNHANDLED_ERROR(retval))
         return 0;
 
+    struct syscall_cache_t *syscall = peek_syscall(SYSCALL_OPEN);
+    if (!syscall)
+        return 0;
+
+    syscall->resolver.key = syscall->open.file.path_key;
+    syscall->resolver.dentry = syscall->open.dentry;
+    syscall->resolver.discarder_type = syscall->policy.mode != NO_FILTER ? EVENT_OPEN : 0;
+    syscall->resolver.callback = DR_OPEN_CALLBACK_KEY;
+    syscall->resolver.iteration = 0;
+    syscall->resolver.ret = 0;
+
+    resolve_dentry(ctx);
+
+    // if the tail call fails, we need to pop the syscall cache entry
+    pop_syscall(SYSCALL_OPEN);
+    return 0;
+}
+
+SEC("kprobe/dr_open_callback")
+int __attribute__((always_inline)) dr_open_callback(struct pt_regs *ctx) {
+    int retval = PT_REGS_RC(ctx);
+    if (IS_UNHANDLED_ERROR(retval))
+        return 0;
+
     struct syscall_cache_t *syscall = pop_syscall(SYSCALL_OPEN);
     if (!syscall)
         return 0;
+
+    if (syscall->resolver.ret == DENTRY_DISCARDED || syscall->resolver.ret == DENTRY_INVALID) {
+       return 0;
+    }
 
     struct open_event_t event = {
         .syscall.retval = retval,
@@ -194,11 +222,6 @@ int __attribute__((always_inline)) trace__sys_open_ret(struct pt_regs *ctx) {
     };
 
     fill_file_metadata(syscall->open.dentry, &event.file.metadata);
-
-    int ret = resolve_dentry(syscall->open.dentry, syscall->open.file.path_key, syscall->policy.mode != NO_FILTER ? EVENT_OPEN : 0);
-    if (ret == DENTRY_DISCARDED || (ret == DENTRY_INVALID && !(IS_UNHANDLED_ERROR(retval)))) {
-       return 0;
-    }
 
     struct proc_cache_t *entry = fill_process_context(&event.process);
     fill_container_context(entry, &event.container);
