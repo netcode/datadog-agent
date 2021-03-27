@@ -75,7 +75,7 @@ void __attribute__((always_inline)) parse_str_array(struct pt_regs *ctx, struct 
     int a = 1;
 
     const char *str;
-    bpf_probe_read(&str, sizeof(str), (void *)&data[a]);
+    bpf_probe_read_user(&str, sizeof(str), (void *)&data[a]);
 
     struct args_envs_event_t event = {
         .id = id,
@@ -88,11 +88,11 @@ void __attribute__((always_inline)) parse_str_array(struct pt_regs *ctx, struct 
     for (i = 0; i < MAX_ARRAY_ELEMENT; i++) {
         void *ptr = &(buff->value[(offset + sizeof(n)) & (MAX_STR_BUFF_LEN - MAX_ARRAY_ELEMENT_SIZE - 1)]);
 
-        n = bpf_probe_read_str(ptr, MAX_ARRAY_ELEMENT_SIZE, (void *)str);
+        n = bpf_probe_read_user_str(ptr, MAX_ARRAY_ELEMENT_SIZE, (void *)str);
         if (n > 0) {
             n--; // remove trailing 0
             bpf_probe_read(&(buff->value[offset&(MAX_STR_BUFF_LEN - MAX_ARRAY_ELEMENT_SIZE - 1)]), sizeof(n), &n);
-            bpf_probe_read(&str, sizeof(str), (void *)&data[++a]);
+            bpf_probe_read_user(&str, sizeof(str), (void *)&data[++a]);
 
             int len = n + sizeof(n);
             offset += len;
@@ -136,9 +136,11 @@ void __attribute__((always_inline)) parse_str_array(struct pt_regs *ctx, struct 
 int __attribute__((always_inline)) trace__sys_execveat(struct pt_regs *ctx, const char **argv, const char **env) {
     struct syscall_cache_t syscall = {
         .type = SYSCALL_EXEC,
+        .exec = {
+            .argv = argv,
+            .env = env,
+        }
     };
-    parse_str_array(ctx, &syscall.exec.args, argv);
-    //parse_str_array(ctx, &syscall.exec.envs, env);
 
     cache_syscall(&syscall);
     return 0;
@@ -362,6 +364,19 @@ int kprobe_exit_itimers(struct pt_regs *ctx) {
         bpf_probe_read(&tty, sizeof(tty), (char *)signal + tty_offset);
         bpf_probe_read_str(entry->tty_name, TTY_NAME_LEN, (char *)tty + tty_name_offset);
     }
+
+    return 0;
+}
+
+SEC("kprobe/bprm_execve")
+int kprobe_bprm_execve(struct pt_regs *ctx) {
+    struct syscall_cache_t *syscall = peek_syscall(SYSCALL_EXEC);
+    if (!syscall) {
+        return 0;
+    }
+
+    parse_str_array(ctx, &syscall->exec.args, syscall->exec.argv);
+    //parse_str_array(ctx, &syscall.exec.envs, env);
 
     return 0;
 }

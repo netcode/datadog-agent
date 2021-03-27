@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/DataDog/datadog-agent/pkg/security/rules"
+	"golang.org/x/sys/unix"
 	"gotest.tools/assert"
 )
 
@@ -40,10 +41,16 @@ func TestChown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Run("chown", func(t *testing.T) {
-		if _, _, errno := syscall.Syscall(syscall.SYS_CHOWN, uintptr(testFilePtr), 100, 200); errno != 0 {
+	t.Run("fchown", func(t *testing.T) {
+		f, err := os.Open(testFile)
+		if err != nil {
 			t.Fatal(err)
 		}
+		// fchown syscall
+		if _, _, errno := syscall.Syscall(syscall.SYS_FCHOWN, f.Fd(), 100, 200); errno != 0 {
+			t.Fatal(err)
+		}
+		defer f.Close()
 
 		event, _, err := test.GetEvent()
 		if err != nil {
@@ -64,16 +71,10 @@ func TestChown(t *testing.T) {
 		}
 	})
 
-	t.Run("fchown", func(t *testing.T) {
-		f, err := os.Open(testFile)
-		if err != nil {
+	t.Run("fchownat", func(t *testing.T) {
+		if _, _, errno := syscall.Syscall6(syscall.SYS_FCHOWNAT, 0, uintptr(testFilePtr), uintptr(101), uintptr(201), 0x100, 0); errno != 0 {
 			t.Fatal(err)
 		}
-		// fchown syscall
-		if _, _, errno := syscall.Syscall(syscall.SYS_FCHOWN, f.Fd(), 101, 201); errno != 0 {
-			t.Fatal(err)
-		}
-		defer f.Close()
 
 		event, _, err := test.GetEvent()
 		if err != nil {
@@ -94,30 +95,6 @@ func TestChown(t *testing.T) {
 		}
 	})
 
-	t.Run("fchownat", func(t *testing.T) {
-		if _, _, errno := syscall.Syscall6(syscall.SYS_FCHOWNAT, 0, uintptr(testFilePtr), uintptr(102), uintptr(202), 0x100, 0); errno != 0 {
-			t.Fatal(err)
-		}
-
-		event, _, err := test.GetEvent()
-		if err != nil {
-			t.Error(err)
-		} else {
-			assert.Equal(t, event.GetType(), "chown", "wrong event type")
-			assert.Equal(t, event.Chown.UID, uint32(102), "wrong user")
-			assert.Equal(t, event.Chown.GID, uint32(202), "wrong user")
-			assert.Equal(t, event.Chown.File.Inode, getInode(t, testFile), "wrong inode")
-			assertRights(t, event.Chown.File.Mode, uint16(expectedMode), "wrong initial mode")
-			assert.Equal(t, event.Chown.File.UID, uint32(101), "wrong initial user")
-			assert.Equal(t, event.Chown.File.GID, uint32(201), "wrong initial group")
-
-			assertNearTime(t, event.Chown.File.MTime)
-			assertNearTime(t, event.Chown.File.CTime)
-
-			testContainerPath(t, event, "chown.file.container_path")
-		}
-	})
-
 	t.Run("lchown", func(t *testing.T) {
 		testSymlink, testSymlinkPtr, err := test.Path("test-symlink")
 		if err != nil {
@@ -129,8 +106,11 @@ func TestChown(t *testing.T) {
 		}
 		defer os.Remove(testSymlink)
 
-		if _, _, errno := syscall.Syscall(syscall.SYS_LCHOWN, uintptr(testSymlinkPtr), uintptr(103), uintptr(203)); errno != 0 {
-			t.Fatal(err)
+		if _, _, errno := syscall.Syscall(syscall.SYS_LCHOWN, uintptr(testSymlinkPtr), uintptr(102), uintptr(202)); errno != 0 {
+			if errno == unix.ENOSYS {
+				t.Skip("lchown is not supported")
+			}
+			t.Fatal(errno)
 		}
 
 		event, rule, err := test.GetEvent()
@@ -139,8 +119,8 @@ func TestChown(t *testing.T) {
 		} else {
 			assert.Equal(t, event.GetType(), "chown", "wrong event type")
 			assertTriggeredRule(t, rule, "test_rule2")
-			assert.Equal(t, event.Chown.UID, uint32(103), "wrong user")
-			assert.Equal(t, event.Chown.GID, uint32(203), "wrong user")
+			assert.Equal(t, event.Chown.UID, uint32(102), "wrong user")
+			assert.Equal(t, event.Chown.GID, uint32(202), "wrong user")
 			assert.Equal(t, event.Chown.File.Inode, getInode(t, testSymlink), "wrong inode")
 			assertRights(t, event.Chown.File.Mode, 0o777, "wrong initial mode")
 			assert.Equal(t, event.Chown.File.UID, uint32(0), "wrong initial user")
@@ -152,4 +132,28 @@ func TestChown(t *testing.T) {
 			testContainerPath(t, event, "chown.file.container_path")
 		}
 	})
+
+	t.Run("chown", ifSyscallSupported("SYS_CHOWN", func(t *testing.T, syscallNB uintptr) {
+		if _, _, errno := syscall.Syscall(syscallNB, uintptr(testFilePtr), 103, 203); errno != 0 {
+			t.Fatal(err)
+		}
+
+		event, _, err := test.GetEvent()
+		if err != nil {
+			t.Error(err)
+		} else {
+			assert.Equal(t, event.GetType(), "chown", "wrong event type")
+			assert.Equal(t, event.Chown.UID, uint32(103), "wrong user")
+			assert.Equal(t, event.Chown.GID, uint32(203), "wrong user")
+			assert.Equal(t, event.Chown.File.Inode, getInode(t, testFile), "wrong inode")
+			assertRights(t, event.Chown.File.Mode, uint16(expectedMode), "wrong initial mode")
+			assert.Equal(t, event.Chown.File.UID, uint32(102), "wrong initial user")
+			assert.Equal(t, event.Chown.File.GID, uint32(202), "wrong initial group")
+
+			assertNearTime(t, event.Chown.File.MTime)
+			assertNearTime(t, event.Chown.File.CTime)
+
+			testContainerPath(t, event, "chown.file.container_path")
+		}
+	}))
 }

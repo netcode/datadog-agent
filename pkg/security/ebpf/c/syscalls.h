@@ -98,6 +98,8 @@ struct syscall_cache_t {
         } clone;
 
         struct {
+            const char **argv;
+            const char **env;
             struct dentry *dentry;
             struct file_t file;
             struct str_array_ref_t args;
