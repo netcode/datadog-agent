@@ -10,7 +10,10 @@ package replay
 import (
 	"os"
 	"syscall"
+	"unsafe"
 )
+
+const maxMapSize = 0xFFFFFFFFFFFF // 256TB
 
 func getFileMap(path string) ([]byte, error) {
 
@@ -44,6 +47,8 @@ func getFileMap(path string) ([]byte, error) {
 	}
 
 	// Convert to a byte array.
-	return ((*[maxMapSize]byte)(unsafe.Pointer(addr))), nill
+	// ptr := ((*[maxMapSize]byte)(unsafe.Pointer(addr)))
+	ptr := ((*[]byte)(unsafe.Pointer(addr)))
+	return *ptr, nil
 
 }

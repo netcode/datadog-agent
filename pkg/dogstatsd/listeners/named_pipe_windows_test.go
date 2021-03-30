@@ -15,6 +15,8 @@ import (
 
 	"github.com/Microsoft/go-winio"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/DataDog/datadog-agent/pkg/dogstatsd/packets"
 )
 
 const pipeName = "TestPipeName"
@@ -115,14 +117,14 @@ func TestNamedPipeTooBigMessage(t *testing.T) {
 
 type namedPipeListenerTest struct {
 	*NamedPipeListener
-	packetOut chan Packets
+	packetOut chan packets.Packets
 	client    net.Conn
 }
 
 func newNamedPipeListenerTest(t *testing.T) namedPipeListenerTest {
-	pool := NewPacketPool(maxPipeMessageCount)
-	packetOut := make(chan Packets, maxPipeMessageCount)
-	packetManager := newPacketManager(10, maxPipeMessageCount, 10*time.Millisecond, packetOut, pool)
+	pool := packets.NewPool(maxPipeMessageCount)
+	packetOut := make(chan packets.Packets, maxPipeMessageCount)
+	packetManager := packets.NewPacketManager(10, maxPipeMessageCount, 10*time.Millisecond, packetOut, pool)
 
 	listener, err := newNamedPipeListener(
 		pipeName,
